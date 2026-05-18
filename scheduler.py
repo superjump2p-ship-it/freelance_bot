@@ -40,13 +40,14 @@ async def check_and_send(bot: Bot) -> None:
     - для каждой записи пытаемся отправить сообщение `bot.send_message`
     - если отправка успешна, помечаем запись `done = 1`
     """
-    now_iso = datetime.now().isoformat()
+    now_ts = int(datetime.now().timestamp())
     conn = get_connection()
     try:
         cur = conn.cursor()
+        # Используем числовой таймстамп send_ts для надёжных сравнений
         cur.execute(
-            "SELECT id, user_id, text FROM reminders WHERE done = 0 AND send_at IS NOT NULL AND send_at <= ?",
-            (now_iso,),
+            "SELECT id, user_id, text FROM reminders WHERE done = 0 AND send_ts IS NOT NULL AND send_ts <= ?",
+            (now_ts,),
         )
         rows = cur.fetchall()
 
@@ -82,10 +83,11 @@ async def check_and_send(bot: Bot) -> None:
                 await bot.send_message(
                     user_id, f"⏰ Напоминание\n📩 {text}", reply_markup=markup
                 )
-                # После отправки очищаем send_at, чтобы не слать повторно —
+                # После отправки очищаем send_at и send_ts, чтобы не слать повторно —
                 # дальнейшие действия (snooze/done) будут обновлять запись
                 cur.execute(
-                    "UPDATE reminders SET send_at = NULL WHERE id = ?", (reminder_id,)
+                    "UPDATE reminders SET send_at = NULL, send_ts = NULL WHERE id = ?",
+                    (reminder_id,),
                 )
                 conn.commit()
                 logging.info("Sent reminder %s to user %s", reminder_id, user_id)

@@ -13,6 +13,7 @@ db.py
 import sqlite3
 from pathlib import Path
 from typing import Optional
+import logging
 
 # Путь к файлу базы данных (в той же папке проекта)
 DB_PATH = Path(__file__).parent / "reminders.db"
@@ -44,12 +45,23 @@ def init_db() -> None:
         user_id INTEGER NOT NULL,
         text TEXT NOT NULL,
         send_at TEXT,
+        send_ts INTEGER,
         done INTEGER NOT NULL DEFAULT 0
     )
     """
     conn = get_connection()
     try:
         conn.executescript(create_table_sql)
+        # Если старый файл БД уже существовал без колонки send_ts, добавим её
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(reminders)")
+        cols = [r[1] for r in cur.fetchall()]
+        if "send_ts" not in cols:
+            try:
+                cur.execute("ALTER TABLE reminders ADD COLUMN send_ts INTEGER")
+            except Exception:
+                # Игнорируем, если не удалось добавить (например, concurrent access)
+                pass
         conn.commit()
     finally:
         conn.close()
@@ -71,7 +83,14 @@ def save_message(user_id: int, text: str) -> int:
             "INSERT INTO reminders (user_id, text) VALUES (?, ?)", (user_id, text)
         )
         conn.commit()
-        return cur.lastrowid
+        rid = cur.lastrowid
+        logging.getLogger("db").info(
+            "Saved reminder id=%s for user=%s text=%s",
+            rid,
+            user_id,
+            (text[:50] + "...") if len(text) > 50 else text,
+        )
+        return rid
     finally:
         conn.close()
 
@@ -82,12 +101,27 @@ def save_send_time(reminder_id: int, send_at_iso: str) -> None:
     - reminder_id: id записи в таблице reminders
     - send_at_iso: строка времени в ISO-формате (например, '2026-05-17T20:00:00')
     """
+    # Преобразуем ISO-строку в целочисленный таймстамп для корректного сравнения в SQLite
+    from datetime import datetime
+
+    try:
+        dt = datetime.fromisoformat(send_at_iso)
+        ts = int(dt.timestamp())
+    except Exception:
+        ts = None
+
     conn = get_connection()
     try:
-        conn.execute(
-            "UPDATE reminders SET send_at = ?, done = 0 WHERE id = ?",
-            (send_at_iso, reminder_id),
-        )
+        if ts is not None:
+            conn.execute(
+                "UPDATE reminders SET send_at = ?, send_ts = ?, done = 0 WHERE id = ?",
+                (send_at_iso, ts, reminder_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE reminders SET send_at = ?, send_ts = NULL, done = 0 WHERE id = ?",
+                (send_at_iso, reminder_id),
+            )
         conn.commit()
     finally:
         conn.close()

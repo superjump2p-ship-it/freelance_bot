@@ -10,6 +10,7 @@ message.bot.py
 # ...existing code...
 # ...existing code...
 import asyncio
+import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import (
@@ -34,8 +35,11 @@ In-memory state
 незавершённые операции для каждого `chat_id`.
 """
 
-pending_reminder_ids: dict[int, int] = {}
-pending_texts: dict[int, str] = {}
+# pending_reminder_ids: хранит список незавершённых reminder_id для каждого чата
+pending_reminder_ids: dict[int, list[int]] = {}
+# pending_custom_time: если пользователь выбрал "своё время", ждём ввода и
+# храним reminder_id здесь: chat_id -> reminder_id
+pending_custom_time: dict[int, int] = {}
 
 
 # ---------------------
@@ -50,6 +54,12 @@ async def main() -> None:
     """
     # Инициализация БД
     from db import init_db
+
+    # Настройка логирования для бота (если ещё не настроено)
+    if not logging.getLogger().hasHandlers():
+        logging.basicConfig(
+            level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s"
+        )
 
     init_db()
 
@@ -130,16 +140,26 @@ async def main() -> None:
         Для первых трёх кнопок сохраняем текст и рассчитанное `send_at` в БД.
         Для "своё время" сохраняем запись без `send_at` и просим прислать время.
         """
-        from db import save_message, save_send_time
+        from db import save_send_time, get_reminder
 
         chat_id = call.message.chat.id
         key = call.data.split(":", 1)[1]
-        text = pending_texts.pop(chat_id, None)
-        if text is None:
+        # Берём последний добавленный reminder_id для чата
+        lst = pending_reminder_ids.get(chat_id)
+        if not lst:
             await call.answer(
                 "Текст напоминания не найден или уже обработан.", show_alert=True
             )
             return
+        reminder_id = lst.pop()
+        logging.getLogger("main").info(
+            "process_reminder_callback: chat_id=%s reminder_id=%s key=%s",
+            chat_id,
+            reminder_id,
+            key,
+        )
+        if not lst:
+            pending_reminder_ids.pop(chat_id, None)
 
         from datetime import datetime, time, timedelta
 
@@ -158,9 +178,8 @@ async def main() -> None:
             send_at = datetime.combine(tomorrow, time(hour=9))
             label = "завтра"
         else:  # custom
-            # Сохраняем запись без `send_at` и попросим пользователя прислать время
-            reminder_id = save_message(chat_id, text)
-            pending_reminder_ids[chat_id] = reminder_id
+            # Переводим запись в режим ожидания пользовательского времени
+            pending_custom_time[chat_id] = reminder_id
             await call.message.edit_reply_markup(reply_markup=None)
             await call.message.answer(
                 "Напоминание сохранено. Отправьте время в формате YYYY-MM-DD HH:MM или ISO",
@@ -168,14 +187,20 @@ async def main() -> None:
             await call.answer()
             return
 
-        # Сохраняем сообщение и время отправки в БД
-        reminder_id = save_message(chat_id, text)
+        # Сохраняем время отправки для уже созданной записи
         send_at_iso = send_at.isoformat()
         save_send_time(reminder_id, send_at_iso)
 
+        # Получаем сохранённый текст напоминания для вывода пользователю
+        row = get_reminder(reminder_id)
+        text_saved = row[2] if row is not None else "(текст не найден)"
+        logging.getLogger("main").info(
+            "Saved send_time for reminder_id=%s send_at=%s", reminder_id, send_at_iso
+        )
+
         await call.message.edit_reply_markup(reply_markup=None)
         await call.message.answer(
-            f"Напоминание сохранено:\n\nТекст: {text}\nВремя: {label}"
+            f"Напоминание сохранено:\n\nТекст: {text_saved}\nВремя: {label}"
         )
         await call.answer()
 
@@ -235,7 +260,16 @@ async def main() -> None:
         и показываем inline-кнопки для выбора времени.
         """
         chat_id = message.chat.id
-        pending_texts[chat_id] = message.text
+        # Если сейчас ожидаем от пользователя ввод времени для "своё время",
+        # не обрабатываем это сообщение как новый текст напоминания.
+        if chat_id in pending_custom_time:
+            return
+
+        from db import save_message
+
+        # Сохраняем напоминание в БД сразу и добавляем в очередь pending_reminder_ids
+        reminder_id = save_message(chat_id, message.text)
+        pending_reminder_ids.setdefault(chat_id, []).append(reminder_id)
         await message.answer("Выберите время напоминания:", reply_markup=inline_kb)
 
     # Обработчик сообщений с пользовательским временем (простая парсинг-логика)
@@ -247,7 +281,9 @@ async def main() -> None:
         from db import save_send_time, get_reminder
 
         chat_id = message.chat.id
-        reminder_id = pending_reminder_ids.pop(chat_id, None)
+        # Не удаляем запись из pending_custom_time до успешного парсинга —
+        # иначе при неверном формате мы потеряем состояние ожидания
+        reminder_id = pending_custom_time.get(chat_id)
         if reminder_id is None:
             return  # не нашу задачу — пусть другие хэндлеры обрабатывают
 
@@ -266,10 +302,13 @@ async def main() -> None:
                     "Не понял формат. Отправьте время в формате YYYY-MM-DD HH:MM или ISO."
                 )
                 # вернуть ожидание: пользователь может попробовать снова
-                pending_reminder_ids[chat_id] = reminder_id
+                # Восстанавливаем reminder_id в очереди pending_reminder_ids
+                pending_reminder_ids.setdefault(chat_id, []).append(reminder_id)
                 return
 
         send_at_iso = dt.isoformat()
+        # на успешном парсинге удаляем флаг ожидания и сохраняем время
+        pending_custom_time.pop(chat_id, None)
         save_send_time(reminder_id, send_at_iso)
         row = get_reminder(reminder_id)
         text_saved = row[2] if row is not None else "(текст не найден)"
