@@ -13,6 +13,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramConflictError
 from aiogram.types import (
     Message,
     InlineKeyboardMarkup,
@@ -202,8 +203,10 @@ async def main() -> None:
                 send_at = datetime.combine(tomorrow, time(hour=9))
                 label = "завтра"
             else:  # custom
-                # Переводим запись в режим ожидания пользовательского времени
-                pending_custom_time[chat_id] = reminder_id
+                # Переводим запись в режим ожидания пользовательского времени (DB-backed)
+                from db import set_pending_custom
+
+                set_pending_custom(chat_id, reminder_id)
                 await call.message.edit_reply_markup(reply_markup=None)
                 await call.message.answer(
                     "Напоминание сохранено. Отправьте время в формате YYYY-MM-DD HH:MM или ISO",
@@ -311,9 +314,62 @@ async def main() -> None:
         # Игнорируем командные сообщения, чтобы обработчики Command(...) сработали
         if message.text and message.text.strip().startswith("/"):
             return
-        # Если сейчас ожидаем от пользователя ввод времени для "своё время",
-        # не обрабатываем это сообщение как новый текст напоминания.
-        if chat_id in pending_custom_time:
+        # Если чат ожидает пользовательского времени, попробуем распарсить
+        # вход как время; иначе создаём новое напоминание.
+        # Check persistent pending_custom first (supports other devices / restarts)
+        from db import get_pending_custom, pop_pending_custom, set_pending_custom
+
+        if get_pending_custom(chat_id) is not None:
+            # Попытка распарсить время (ISO, 'YYYY-MM-DD HH:MM' или 'HH:MM')
+            from datetime import datetime, timedelta
+
+            text = message.text.strip()
+            dt = None
+            try:
+                dt = datetime.fromisoformat(text)
+            except Exception:
+                try:
+                    dt = datetime.strptime(text, "%Y-%m-%d %H:%M")
+                except Exception:
+                    try:
+                        t = datetime.strptime(text, "%H:%M").time()
+                        today = datetime.now().date()
+                        dt = datetime.combine(today, t)
+                        if dt <= datetime.now():
+                            dt = dt + timedelta(days=1)
+                    except Exception:
+                        dt = None
+
+            if dt is None:
+                # Не распарсилось — попросим повторить ввод времени
+                await message.answer(
+                    "Не понял формат. Отправьте время в формате YYYY-MM-DD HH:MM, HH:MM или ISO."
+                )
+                return
+
+            # Сохраняем время и подтверждаем
+            reminder_id = pop_pending_custom(chat_id)
+            if reminder_id is None:
+                await message.answer(
+                    "Время не привязано к напоминанию. Попробуйте заново."
+                )
+                return
+            send_at_iso = dt.isoformat()
+            from db import save_send_time, get_reminder
+
+            save_send_time(reminder_id, send_at_iso)
+            logging.getLogger("main").info(
+                "handle_any_text(custom): chat_id=%s reminder_id=%s send_at=%s input=%s",
+                chat_id,
+                reminder_id,
+                send_at_iso,
+                text,
+            )
+            row = get_reminder(reminder_id)
+            text_saved = row[2] if row is not None else "(текст не найден)"
+            await message.answer(
+                f"Напоминание сохранено:\n\nТекст: {text_saved}\nВремя: {send_at_iso}"
+            )
             return
 
         from db import save_message
@@ -334,7 +390,9 @@ async def main() -> None:
         chat_id = message.chat.id
         # Не удаляем запись из pending_custom_time до успешного парсинга —
         # иначе при неверном формате мы потеряем состояние ожидания
-        reminder_id = pending_custom_time.get(chat_id)
+        from db import get_pending_custom, set_pending_custom, pop_pending_custom
+
+        reminder_id = get_pending_custom(chat_id)
         if reminder_id is None:
             return  # не нашу задачу — пусть другие хэндлеры обрабатывают
 
@@ -349,18 +407,36 @@ async def main() -> None:
             try:
                 dt = datetime.strptime(text, "%Y-%m-%d %H:%M")
             except Exception:
-                await message.answer(
-                    "Не понял формат. Отправьте время в формате YYYY-MM-DD HH:MM или ISO."
-                )
-                # вернуть ожидание: пользователь может попробовать снова
-                # Восстанавливаем reminder_id в очереди pending_reminder_ids
-                pending_reminder_ids.setdefault(chat_id, []).append(reminder_id)
-                return
+                try:
+                    # Поддержка простого формата 'HH:MM' — беру сегодня в этот момент
+                    t = datetime.strptime(text, "%H:%M").time()
+                    today = datetime.now().date()
+                    dt = datetime.combine(today, t)
+                    if dt <= datetime.now():
+                        # если время уже прошло — на завтра
+                        from datetime import timedelta
+
+                        dt = dt + timedelta(days=1)
+                except Exception:
+                    await message.answer(
+                        "Не понял формат. Отправьте время в формате YYYY-MM-DD HH:MM или ISO."
+                    )
+                    # вернуть ожидание: пользователь может попробовать снова
+                    # Восстанавливаем запись ожидания в БД
+                    set_pending_custom(chat_id, reminder_id)
+                    return
 
         send_at_iso = dt.isoformat()
         # на успешном парсинге удаляем флаг ожидания и сохраняем время
-        pending_custom_time.pop(chat_id, None)
+        pop_pending_custom(chat_id)
         save_send_time(reminder_id, send_at_iso)
+        logging.getLogger("main").info(
+            "handle_custom_time_text: chat_id=%s reminder_id=%s send_at=%s input=%s",
+            chat_id,
+            reminder_id,
+            send_at_iso,
+            text,
+        )
         row = get_reminder(reminder_id)
         text_saved = row[2] if row is not None else "(текст не найден)"
         await message.answer(
@@ -368,7 +444,23 @@ async def main() -> None:
         )
 
     # Запуск long polling
-    await dp.start_polling(bot)
+    # Удаляем webhook и очищаем ожидающие обновления (если webhook был установлен),
+    # чтобы избежать конфликтов с getUpdates на сервере Telegram.
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logging.getLogger("main").info("Webhook cleared before polling")
+    except Exception:
+        logging.getLogger("main").exception("Failed to delete webhook (ignored)")
+
+    try:
+        await dp.start_polling(bot)
+    except TelegramConflictError as e:
+        logging.getLogger("main").error(
+            "Polling failed due to TelegramConflictError: %s. Make sure no other bot instance or webhook is running.",
+            e,
+        )
+        # Exit so user can resolve the conflict (another process or webhook)
+        return
 
 
 if __name__ == "__main__":

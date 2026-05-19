@@ -49,9 +49,17 @@ def init_db() -> None:
         done INTEGER NOT NULL DEFAULT 0
     )
     """
+    # Также таблица для хранения ожидания пользовательского времени
+    create_pending_sql = """
+    CREATE TABLE IF NOT EXISTS pending_custom (
+        chat_id INTEGER PRIMARY KEY,
+        reminder_id INTEGER
+    )
+    """
     conn = get_connection()
     try:
         conn.executescript(create_table_sql)
+        conn.executescript(create_pending_sql)
         # Если старый файл БД уже существовал без колонки send_ts, добавим её
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(reminders)")
@@ -62,9 +70,81 @@ def init_db() -> None:
             except Exception:
                 # Игнорируем, если не удалось добавить (например, concurrent access)
                 pass
+        # Выполним миграцию: если есть записи с send_at, но без send_ts — посчитаем send_ts
+        try:
+            cur.execute(
+                "SELECT id, send_at FROM reminders WHERE send_at IS NOT NULL AND (send_ts IS NULL OR send_ts = '')"
+            )
+            rows = cur.fetchall()
+            if rows:
+                from datetime import datetime
+
+                for rid, send_at in rows:
+                    try:
+                        dt = datetime.fromisoformat(send_at)
+                        ts = int(dt.timestamp())
+                        cur.execute(
+                            "UPDATE reminders SET send_ts = ? WHERE id = ?", (ts, rid)
+                        )
+                        logging.getLogger("db").info(
+                            "Migrated send_ts for reminder id=%s send_at=%s -> %s",
+                            rid,
+                            send_at,
+                            ts,
+                        )
+                    except Exception:
+                        logging.getLogger("db").warning(
+                            "Failed to parse send_at for reminder id=%s: %s",
+                            rid,
+                            send_at,
+                        )
+        except Exception:
+            # безопасно игнорируем проблемы с миграцией
+            logging.getLogger("db").exception("Migration of send_ts failed")
         conn.commit()
     finally:
         conn.close()
+
+
+def set_pending_custom(chat_id: int, reminder_id: int) -> None:
+    """Устанавливает в БД, что для `chat_id` ожидается ввод времени для `reminder_id`."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO pending_custom (chat_id, reminder_id) VALUES (?, ?)",
+            (chat_id, reminder_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_pending_custom(chat_id: int) -> Optional[int]:
+    """Возвращает reminder_id, если для chat_id ожидается ввод времени, иначе None."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT reminder_id FROM pending_custom WHERE chat_id = ?", (chat_id,)
+        )
+        row = cur.fetchone()
+        return row[0] if row is not None else None
+    finally:
+        conn.close()
+
+
+def pop_pending_custom(chat_id: int) -> Optional[int]:
+    """Получает и удаляет запись pending_custom для chat_id."""
+    rid = get_pending_custom(chat_id)
+    if rid is None:
+        return None
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM pending_custom WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return rid
 
 
 def save_message(user_id: int, text: str) -> int:

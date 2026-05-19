@@ -53,6 +53,10 @@ async def check_and_send(bot: Bot) -> None:
 
         if not rows:
             logging.debug("No due reminders found")
+        else:
+            logging.info("Found %d due reminders", len(rows))
+            for r in rows:
+                logging.debug("due reminder: %s", r)
 
         for reminder_id, user_id, text in rows:
             try:
