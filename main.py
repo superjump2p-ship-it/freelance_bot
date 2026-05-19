@@ -124,11 +124,13 @@ async def main() -> None:
         время отправки
         """
         try:
-            from db import get_inbox_reminders
+            # Показываем только активные (не выполненные) напоминания для текущего пользователя
+            from db import get_active_reminders
 
-            rows = get_inbox_reminders()
+            chat_id = message.chat.id
+            rows = get_active_reminders(chat_id)
             if not rows:
-                await message.answer("В базе нет невыполненных напоминаний.")
+                await message.answer("У вас нет невыполненных напоминаний.")
                 return
 
             parts: list[str] = []
@@ -137,7 +139,7 @@ async def main() -> None:
                 parts.append(f"{text}\n\n{send_display}")
 
             await message.answer(
-                "Inbox (все невыполненные напоминания):\n\n" + "\n\n".join(parts)
+                "Ваши невыполненные напоминания:\n\n" + "\n\n".join(parts)
             )
         except Exception:
             logging.exception("cmd_inbox failed for chat=%s", message.chat.id)

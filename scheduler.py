@@ -24,7 +24,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import BOT_TOKEN
-from db import get_connection
+from db import get_due_reminders, remove_reminder
 
 logging.basicConfig(
     level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s"
@@ -40,67 +40,75 @@ async def check_and_send(bot: Bot) -> None:
     - для каждой записи пытаемся отправить сообщение `bot.send_message`
     - если отправка успешна, помечаем запись `done = 1`
     """
-    now_ts = int(datetime.now().timestamp())
-    conn = get_connection()
-    try:
-        cur = conn.cursor()
-        # Используем числовой таймстамп send_ts для надёжных сравнений
-        cur.execute(
-            "SELECT id, user_id, text FROM reminders WHERE done = 0 AND send_ts IS NOT NULL AND send_ts <= ?",
-            (now_ts,),
-        )
-        rows = cur.fetchall()
+    now = datetime.now()
+    rows = get_due_reminders(now)
+    if not rows:
+        logging.debug("No due reminders found")
+    else:
+        logging.info("Found %d due reminders", len(rows))
+        for r in rows:
+            logging.debug("due reminder: %s", r)
 
-        if not rows:
-            logging.debug("No due reminders found")
-        else:
-            logging.info("Found %d due reminders", len(rows))
-            for r in rows:
-                logging.debug("due reminder: %s", r)
+    for reminder_id, user_id, text, send_at in rows:
+        try:
+            # Inline action buttons: done / snooze 1h / snooze tomorrow
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="Сделано",
+                            callback_data=f"rem_action:{reminder_id}:done",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="Отложить на 1 час",
+                            callback_data=f"rem_action:{reminder_id}:snooze_1h",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="Отложить на завтра",
+                            callback_data=f"rem_action:{reminder_id}:snooze_tomorrow",
+                        )
+                    ],
+                ]
+            )
 
-        for reminder_id, user_id, text in rows:
+            # Отправляем сообщение и в случае успеха помечаем запись как выполненную
             try:
-                # Inline action buttons: done / snooze 1h / snooze tomorrow
-                markup = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="Сделано",
-                                callback_data=f"rem_action:{reminder_id}:done",
-                            )
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                text="Отложить на 1 час",
-                                callback_data=f"rem_action:{reminder_id}:snooze_1h",
-                            )
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                text="Отложить на завтра",
-                                callback_data=f"rem_action:{reminder_id}:snooze_tomorrow",
-                            )
-                        ],
-                    ]
-                )
-
-                await bot.send_message(
+                # сохраняем возвращённое сообщение для отладки
+                sent_msg = await bot.send_message(
                     user_id, f"⏰ Напоминание\n📩 {text}", reply_markup=markup
                 )
-                # После отправки очищаем send_at и send_ts, чтобы не слать повторно —
-                # дальнейшие действия (snooze/done) будут обновлять запись
-                cur.execute(
-                    "UPDATE reminders SET send_at = NULL, send_ts = NULL WHERE id = ?",
-                    (reminder_id,),
-                )
-                conn.commit()
-                logging.info("Sent reminder %s to user %s", reminder_id, user_id)
             except Exception:
+                # если отправка упала — логируем и пропускаем обновление БД
                 logging.exception(
                     "Failed to send reminder %s to %s", reminder_id, user_id
                 )
-    finally:
-        conn.close()
+                continue
+
+            # удаляем напоминание из хранилища после успешной отправки
+            try:
+                removed = remove_reminder(reminder_id)
+                if not removed:
+                    logging.getLogger("scheduler").warning(
+                        "Sent reminder %s but failed to remove from storage",
+                        reminder_id,
+                    )
+            except Exception:
+                logging.exception(
+                    "Failed to remove reminder %s after sending", reminder_id
+                )
+            msg_id = getattr(sent_msg, "message_id", None)
+            logging.info(
+                "Sent reminder %s to user %s (message_id=%s)",
+                reminder_id,
+                user_id,
+                msg_id,
+            )
+        except Exception:
+            logging.exception("Failed to send reminder %s to %s", reminder_id, user_id)
 
 
 async def scheduler_loop(interval_seconds: int = 30) -> None:
