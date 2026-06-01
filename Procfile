@@ -1,0 +1,1 @@
+worker: python freelance_bot.py
