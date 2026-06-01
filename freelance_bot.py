@@ -1,3 +1,4 @@
+import os
 import asyncio
 import sqlite3
 from datetime import datetime
@@ -48,9 +49,7 @@ def add_event(user_id, event):
     conn.commit()
 
 
-OPENROUTER_API_KEY = (
-    ""
-)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 def analyze_order(text: str):
@@ -121,7 +120,7 @@ Keep responses concise, practical, and focused on helping a freelancer understan
         return "Error: AI request failed"
 
 
-TOKEN = ""
+TOKEN = os.getenv("TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 router = Router()
