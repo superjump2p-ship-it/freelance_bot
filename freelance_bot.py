@@ -48,23 +48,18 @@ def add_event(user_id, event):
     conn.commit()
 
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
 def analyze_order(text: str):
-    url = "https://openrouter.ai/api/v1/chat/completions"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
 
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
     }
 
-    data = {
-        "model": "openai/gpt-4.1-mini",
-        "messages": [
-            {
-                "role": "system",
-                "content": """ROLE:
+    prompt = f"""
+ROLE:
 You are a senior freelance software engineer and AI assistant that helps freelancers win jobs.
 
 You do TWO things:
@@ -79,114 +74,43 @@ You must return STRICT JSON ONLY.
 
 OUTPUT FORMAT (STRICT JSON):
 
-{
-  "analysis": {
+{{
+  "analysis": {{
     "summary": "",
     "risks": [],
     "complexity": "easy | medium | hard",
     "key_points": [],
     "suggested_stack": [],
     "clarifying_questions": []
-  },
-  "proposals": {
+  }},
+  "proposals": {{
     "fast": "",
     "professional": "",
     "premium": ""
-  }
-}
-
----
-
-MEANING OF PROPOSALS:
-
-FAST:
-- very short
-- direct
-- minimal text
-- focus on speed + understanding
-
-PROFESSIONAL:
-- balanced
-- clear structure
-- persuasive
-- moderate technical detail
-
-PREMIUM:
-- senior level tone
-- strong engineering reasoning
-- architecture thinking
-- shows deep understanding of risks and system design
-- NO fake real project names
-- uses "engineering experience patterns" (e.g. similar systems, not specific companies)
+  }}
+}}
 
 ---
 
 RULES:
-- Do NOT invent real company/project experience
-- Do NOT write markdown
-- Do NOT add explanations outside JSON
-- Keep text natural and human
-- Be specific to the user's request
-- Language must match user input language
+- Return ONLY valid JSON
+- No markdown
+- No explanation
+- No extra text
 
+USER REQUEST:
+{text}
+"""
 
-PROPOSAL STYLE CONTROL:
-
-Each proposal must adapt based on these 3 dimensions:
-
-1) COMMUNICATION TONE:
-- friendly
-- neutral professional
-- confident senior
-
-2) POSITIVITY LEVEL:
-- low (strict, technical)
-- medium (balanced)
-- high (very friendly, client-oriented)
-
-3) LONG-TERM ORIENTATION:
-- low: focus only on this task
-- medium: mention maintainability
-- high: emphasize long-term collaboration and support
-
-IMPORTANT:
-These attributes must NOT be explicitly labeled in output.
-They must be naturally embedded in the writing style.
-
-Always aim to make the client feel:
-- easy to work with
-- confident in developer
-- safe to continue long-term cooperation
-
-
-STYLE DISTRIBUTION RULE:
-
-FAST:
-- tone: neutral professional
-- positivity: medium
-- long-term: low
-
-PROFESSIONAL:
-- tone: friendly or neutral professional
-- positivity: medium-high
-- long-term: medium
-
-PREMIUM:
-- tone: confident senior
-- positivity: high
-- long-term: high
-
----
-
-GOAL:
-Help freelancer understand the project AND win the client.
-Use communication tone, positivity level, and long-term orientation naturally depending on proposal type (fast / professional / premium).
-CRITICAL RULE:
-Return ONLY valid JSON. No text before or after JSON.
-""",
-            },
-            {"role": "user", "content": text},
-        ],
+    data = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ]
     }
 
     try:
@@ -210,8 +134,8 @@ Return ONLY valid JSON. No text before or after JSON.
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise ValueError("TOKEN not found in environment")
-if not OPENROUTER_API_KEY:
-    raise ValueError("OPENROUTER_API_KEY not found in environment")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not found in environment")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
