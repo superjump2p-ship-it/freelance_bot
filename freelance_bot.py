@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime
 
 import requests
+import json
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import (
     Message,
@@ -61,58 +62,141 @@ def analyze_order(text: str):
     }
 
     data = {
-        "model": "openai/gpt-4o-mini",
+        "model": "openai/gpt-4.1-mini",
         "messages": [
             {
                 "role": "system",
                 "content": """ROLE:
-You are a highly experienced freelance software engineer who regularly wins projects on Upwork, Fiverr, and direct client contracts. Act like a real freelancer writing a proposal to win a job. Your goal is to maximize the chance of being hired.
+You are a senior freelance software engineer and AI assistant that helps freelancers win jobs.
 
-Key behaviour and responsibilities:
-- Think like a senior freelancer, not a chatbot
-- Be confident, concise, and practical
-- Never sound generic or robotic
-- Focus on value, execution, and clarity
-- Do not invent requirements that are not mentioned by the client
-- Base conclusions only on the provided project description
-- Do not assume specific frameworks, databases, or technologies unless mentioned by the client.
+You do TWO things:
+1) Analyze client request (business + technical understanding)
+2) Prepare 3 different proposal drafts for different strategies
 
-FORMAT:
-Produce a concise, structured response containing the following sections (use these headings):
+IMPORTANT:
+You must NOT output final formatted text for client.
+You must return STRICT JSON ONLY.
 
-1) Client Needs Summary
-- Extract the real goal behind the request and the primary success criteria.
+---
 
-2) Key Risks / Complexity
-- Identify unclear parts, technical risks, and scaling/architecture concerns.
+OUTPUT FORMAT (STRICT JSON):
 
-3) Smart Clarifying Questions
-- Ask only high-impact questions that affect cost, scope, or architecture.
+{
+  "analysis": {
+    "summary": "",
+    "risks": [],
+    "complexity": "easy | medium | hard",
+    "key_points": [],
+    "suggested_stack": [],
+    "clarifying_questions": []
+  },
+  "proposals": {
+    "fast": "",
+    "professional": "",
+    "premium": ""
+  }
+}
 
-4) Proposal
-- Write as a real freelancer addressing the client directly: brief understanding, approach (stack/structure/plan), and a clear next step.
+---
 
-5) Estimation
-- Difficulty (easy/medium/hard), realistic time range, and a budget range. Note that estimates depend on final scope.
+MEANING OF PROPOSALS:
 
-6) Rules and Tone
-- Professional but human; confident but not arrogant; do NOT be overly polite or verbose; avoid filler phrases.
+FAST:
+- very short
+- direct
+- minimal text
+- focus on speed + understanding
 
-LANGUAGE:
-- Detect the user's language from the input and respond ONLY in that language. Do not switch languages or insert translations.
+PROFESSIONAL:
+- balanced
+- clear structure
+- persuasive
+- moderate technical detail
 
-Use the structure above exactly.
-Keep responses concise, practical, and focused on helping a freelancer understand and win the project.
+PREMIUM:
+- senior level tone
+- strong engineering reasoning
+- architecture thinking
+- shows deep understanding of risks and system design
+- NO fake real project names
+- uses "engineering experience patterns" (e.g. similar systems, not specific companies)
+
+---
+
+RULES:
+- Do NOT invent real company/project experience
+- Do NOT write markdown
+- Do NOT add explanations outside JSON
+- Keep text natural and human
+- Be specific to the user's request
+- Language must match user input language
+
+
+PROPOSAL STYLE CONTROL:
+
+Each proposal must adapt based on these 3 dimensions:
+
+1) COMMUNICATION TONE:
+- friendly
+- neutral professional
+- confident senior
+
+2) POSITIVITY LEVEL:
+- low (strict, technical)
+- medium (balanced)
+- high (very friendly, client-oriented)
+
+3) LONG-TERM ORIENTATION:
+- low: focus only on this task
+- medium: mention maintainability
+- high: emphasize long-term collaboration and support
+
+IMPORTANT:
+These attributes must NOT be explicitly labeled in output.
+They must be naturally embedded in the writing style.
+
+Always aim to make the client feel:
+- easy to work with
+- confident in developer
+- safe to continue long-term cooperation
+
+
+STYLE DISTRIBUTION RULE:
+
+FAST:
+- tone: neutral professional
+- positivity: medium
+- long-term: low
+
+PROFESSIONAL:
+- tone: friendly or neutral professional
+- positivity: medium-high
+- long-term: medium
+
+PREMIUM:
+- tone: confident senior
+- positivity: high
+- long-term: high
+
+---
+
+GOAL:
+Help freelancer understand the project AND win the client.
+Use communication tone, positivity level, and long-term orientation naturally depending on proposal type (fast / professional / premium).
 """,
             },
             {"role": "user", "content": text},
         ],
     }
 
-    r = requests.post(url, json=data, headers=headers)
+    try:
+        r = requests.post(url, json=data, headers=headers, timeout=30)
+    except requests.RequestException:
+        return "NETWORK_ERROR"
+
     if r.status_code != 200:
         return "⚠️ AI service is temporarily unavailable."
-    
+
     try:
         data = r.json()
         return data["choices"][0]["message"]["content"]
@@ -121,6 +205,11 @@ Keep responses concise, practical, and focused on helping a freelancer understan
 
 
 TOKEN = os.getenv("TOKEN")
+if not TOKEN:
+    raise ValueError("TOKEN not found in environment")
+if not OPENROUTER_API_KEY:
+    raise ValueError("OPENROUTER_API_KEY not found in environment")
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 router = Router()
@@ -148,17 +237,51 @@ async def start(message: Message):
     add_event(message.from_user.id, "start")
 
 
-@router.callback_query()
+@router.callback_query(lambda c: c.data == "order")
 async def button(callback: CallbackQuery):
     user_id = callback.from_user.id
-    if callback.data == "order":
-        states[user_id] = "process"
-        await callback.message.answer(
-            "📋 Send the order description in a single message.\n\n"
-            "I will analyze the requirements, highlight the main points, and prepare a response draft."
-        )
+    states[user_id] = "process"
+    await callback.message.answer(
+        "📋 Send the order description in a single message.\n\n"
+        "I will analyze the requirements, highlight the main points, and prepare a response draft."
+    )
     add_event(user_id, "click_order")
     await callback.answer()
+
+
+@router.callback_query(lambda c: c.data in ["fast", "pro", "premium"])
+async def choose(call: CallbackQuery):
+    user_id = call.from_user.id
+
+    if user_id not in states or not isinstance(states[user_id], dict):
+        await call.answer("Сначала отправь заказ")
+        return
+
+    proposals = states[user_id].get("proposals")
+    if not proposals:
+        await call.answer("Нет предложений, сначала отправь заказ")
+        return
+
+    if call.data == "fast":
+        text = proposals.get("fast")
+        if not text:
+            await call.answer("Этот вариант не был сгенерирован")
+            return
+    elif call.data == "pro":
+        text = proposals.get("professional")
+        if not text:
+            await call.answer("Этот вариант не был сгенерирован")
+            return
+    elif call.data == "premium":
+        text = proposals.get("premium")
+        if not text:
+            await call.answer("Этот вариант не был сгенерирован")
+            return
+    else:
+        return
+
+    await call.message.answer(text)
+    await call.answer()
 
 
 @router.message(Command("states12"))
@@ -201,13 +324,87 @@ async def mai(message: Message):
         loading = await message.answer("🔍 Analyzing the order...")
 
         result = await asyncio.to_thread(analyze_order, message.text)
-        add_event(user_id, "success")
-    
-        if len(result) > 4000:
-            result = result[:4000]
-        await loading.edit_text(result)
 
-        states[user_id] = None
+        if result == "NETWORK_ERROR":
+            add_event(user_id, "network_error")
+            await loading.edit_text(
+                "⚠️ Сетевая ошибка: не удалось связаться с AI-сервисом. Попробуйте позже."
+            )
+            states[user_id] = None
+            return
+
+        try:
+            parsed = json.loads(result)
+        except Exception:
+            print(result)
+            await loading.edit_text("⚠️ AI вернул неверный формат")
+            return
+
+        if not parsed.get("proposals"):
+            add_event(user_id, "no_proposals")
+            await loading.edit_text("⚠️ AI не смог подготовить отклики.")
+            states[user_id] = None
+            return
+
+        # Save analysis and proposals in states for later callback handling
+        states[user_id] = {
+            "analysis": parsed.get("analysis", {}),
+            "proposals": parsed.get("proposals", {}),
+        }
+
+        add_event(user_id, "success")
+
+        analysis = states[user_id]["analysis"]
+        summary = analysis.get("summary", "(нет)")
+        risks = analysis.get("risks", [])
+        if isinstance(risks, list):
+            risks_text = "\n- ".join(risks) if risks else "(нет)"
+        else:
+            risks_text = str(risks)
+
+        complexity = analysis.get("complexity", "(не указано)")
+        key_points = analysis.get("key_points", [])
+        suggested_stack = analysis.get("suggested_stack", [])
+        clarifying_questions = analysis.get("clarifying_questions", [])
+
+        kp_text = "\n- ".join(key_points) if key_points else "(нет)"
+        stack_text = ", ".join(suggested_stack) if suggested_stack else "(не указано)"
+        q_text = "\n- ".join(clarifying_questions) if clarifying_questions else "(нет)"
+
+        text = f"""
+📊 Анализ заказа
+
+📌 Суть:
+{summary}
+
+⚠️ Риски:
+- {risks_text}
+
+🧠 Сложность: {complexity}
+
+📌 Ключевые моменты:
+- {kp_text}
+
+🛠 Рекомендуемый стек: {stack_text}
+
+❓ Вопросы клиенту:
+- {q_text}
+"""
+
+        await loading.edit_text("Готово — смотри анализ ниже:")
+        await message.answer(text)
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⚡ Быстрый", callback_data="fast")],
+                [InlineKeyboardButton(text="💼 Профи", callback_data="pro")],
+                [InlineKeyboardButton(text="💰 Премиум", callback_data="premium")],
+            ]
+        )
+
+        await message.answer("Выбери вариант отклика:", reply_markup=kb)
+
+        # keep state so user can press buttons; don't clear here
 
 
 dp.include_router(router)
