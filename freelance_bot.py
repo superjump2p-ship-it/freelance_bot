@@ -436,6 +436,11 @@ dp.include_router(router)
 
 
 async def main():
+    # ensure no webhook is set (prevents TelegramConflictError on deployments)
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
     await dp.start_polling(bot)
 
 
