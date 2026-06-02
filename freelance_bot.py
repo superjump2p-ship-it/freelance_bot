@@ -189,9 +189,21 @@ Return ONLY valid JSON. No text before or after JSON.
         ],
     }
 
-    r = requests.post(url, json=data, headers=headers, timeout=30)
-    data = r.json()
-    return data["choices"][0]["message"]["content"]
+    try:
+        r = requests.post(url, json=data, headers=headers, timeout=30)
+    except requests.RequestException:
+        return {"error": "network"}
+
+    if r.status_code != 200:
+        return {"error": "api", "status": r.status_code, "body": r.text}
+
+    try:
+        resp = r.json()
+        content = resp["choices"][0]["message"]["content"]
+    except Exception:
+        return {"error": "parse"}
+
+    return {"content": content}
 
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
@@ -308,59 +320,78 @@ async def mai(message: Message):
     if user_id not in states:
         await message.answer("👆Click the button above to start to disassemble.")
         return
-    if states[user_id] == "process":
-        add_event(user_id, "send_order")
-        loading = await message.answer("🔍 Analyzing the order...")
 
-        result = await asyncio.to_thread(analyze_order, message.text)
+    if states.get(user_id) != "process":
+        return
 
-        content = result
+    add_event(user_id, "send_order")
+    loading = await message.answer("🔍 Analyzing the order...")
 
-        if not content:
-            await loading.edit_text("⚠️ Пустой ответ от AI")
-            return
+    result = await asyncio.to_thread(analyze_order, message.text)
 
-        if not isinstance(content, str):
-            await loading.edit_text("⚠️ AI вернул не текст")
-            return
+    # handle analyze_order structured result
+    if isinstance(result, dict) and result.get("error"):
+        add_event(user_id, "ai_error")
+        await loading.edit_text("⚠️ AI service error, попробуйте позже.")
+        states[user_id] = None
+        return
 
-        try:
-            parsed = json.loads(content)
-        except Exception:
-            await loading.edit_text("⚠️ AI вернул не JSON (просто повтори запрос)")
-            return
+    content = result.get("content") if isinstance(result, dict) else result
 
-        if not parsed.get("proposals"):
-            add_event(user_id, "no_proposals")
-            await loading.edit_text("⚠️ AI не смог подготовить отклики.")
-            return
+    # empty or non-text protection
+    if not content or not isinstance(content, str):
+        await loading.edit_text("⚠️ AI вернул пустой ответ")
+        states[user_id] = None
+        return
 
-        # Save analysis and proposals in states for later callback handling
-        states[user_id] = {
-            "analysis": parsed.get("analysis", {}),
-            "proposals": parsed.get("proposals", {}),
-        }
-
-        add_event(user_id, "success")
-
-        analysis = states[user_id]["analysis"]
-        summary = analysis.get("summary", "(нет)")
-        risks = analysis.get("risks", [])
-        if isinstance(risks, list):
-            risks_text = "\n- ".join(risks) if risks else "(нет)"
+    # basic cleanup before JSON parsing
+    content = content.strip()
+    if "```" in content:
+        parts = content.split("```")
+        if len(parts) >= 3:
+            content = parts[1]
         else:
-            risks_text = str(risks)
+            content = parts[-1]
 
-        complexity = analysis.get("complexity", "(не указано)")
-        key_points = analysis.get("key_points", [])
-        suggested_stack = analysis.get("suggested_stack", [])
-        clarifying_questions = analysis.get("clarifying_questions", [])
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        await loading.edit_text("⚠️ AI вернул не JSON (просто повтори запрос)")
+        states[user_id] = None
+        return
 
-        kp_text = "\n- ".join(key_points) if key_points else "(нет)"
-        stack_text = ", ".join(suggested_stack) if suggested_stack else "(не указано)"
-        q_text = "\n- ".join(clarifying_questions) if clarifying_questions else "(нет)"
+    if not parsed.get("proposals"):
+        add_event(user_id, "no_proposals")
+        await loading.edit_text("⚠️ AI не смог подготовить отклики.")
+        states[user_id] = None
+        return
 
-        text = f"""
+    # Save analysis and proposals in states for later callback handling
+    states[user_id] = {
+        "analysis": parsed.get("analysis", {}),
+        "proposals": parsed.get("proposals", {}),
+    }
+
+    add_event(user_id, "success")
+
+    analysis = states[user_id]["analysis"]
+    summary = analysis.get("summary", "(нет)")
+    risks = analysis.get("risks", [])
+    if isinstance(risks, list):
+        risks_text = "\n- ".join(risks) if risks else "(нет)"
+    else:
+        risks_text = str(risks)
+
+    complexity = analysis.get("complexity", "(не указано)")
+    key_points = analysis.get("key_points", [])
+    suggested_stack = analysis.get("suggested_stack", [])
+    clarifying_questions = analysis.get("clarifying_questions", [])
+
+    kp_text = "\n- ".join(key_points) if key_points else "(нет)"
+    stack_text = ", ".join(suggested_stack) if suggested_stack else "(не указано)"
+    q_text = "\n- ".join(clarifying_questions) if clarifying_questions else "(нет)"
+
+    text = f"""
 📊 Анализ заказа
 
 📌 Суть:
@@ -380,20 +411,21 @@ async def mai(message: Message):
 - {q_text}
 """
 
-        await loading.edit_text("Готово — смотри анализ ниже:")
-        await message.answer(text)
+    await loading.edit_text("Готово — смотри анализ ниже:")
+    await message.answer(text)
 
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⚡ Быстрый", callback_data="fast")],
-                [InlineKeyboardButton(text="💼 Профи", callback_data="pro")],
-                [InlineKeyboardButton(text="💰 Премиум", callback_data="premium")],
-            ]
-        )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚡ Быстрый", callback_data="fast")],
+            [InlineKeyboardButton(text="💼 Профи", callback_data="pro")],
+            [InlineKeyboardButton(text="💰 Премиум", callback_data="premium")],
+        ]
+    )
 
-        await message.answer("Выбери вариант отклика:", reply_markup=kb)
+    await message.answer("Выбери вариант отклика:", reply_markup=kb)
 
-        # keep state so user can press buttons; don't clear here
+    # clear state so bot won't try to re-analyze arbitrary messages
+    states[user_id] = None
 
 
 dp.include_router(router)
