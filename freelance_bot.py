@@ -322,8 +322,9 @@ async def mai(message: Message):
     if not message.text:
         return
     if user_id not in states:
-        await message.answer("👆Click the button above to start to disassemble.")
-        return
+        # If user used /start but didn't press the inline "order" button,
+        # allow them to send the order directly by entering process mode.
+        states[user_id] = "process"
 
     if states.get(user_id) != "process":
         return
@@ -360,12 +361,14 @@ async def mai(message: Message):
         try:
             parsed = json.loads(content)
         except Exception:
-            await loading.edit_text("⚠️ AI вернул не JSON (просто повтори запрос)")
+            snippet = content[:1000].replace('\n', ' ')
+            await loading.edit_text(f"⚠️ AI вернул не JSON. RAW: {snippet}")
             return
 
         if not parsed.get("proposals"):
             add_event(user_id, "no_proposals")
-            await loading.edit_text("⚠️ AI не смог подготовить отклики.")
+            keys = ",".join(sorted(parsed.keys())) if isinstance(parsed, dict) else str(type(parsed))
+            await loading.edit_text(f"⚠️ AI не смог подготовить отклики. Parsed keys: {keys}")
             return
 
         # Save analysis and proposals in states for later callback handling
