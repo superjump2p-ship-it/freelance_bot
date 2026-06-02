@@ -200,9 +200,14 @@ Use communication tone, positivity level, and long-term orientation naturally de
     try:
         data = r.json()
         return data["choices"][0]["message"]["content"]
-    except Exception:
-        return "Error: AI request failed"
-
+    except Exception as e:
+        print("JSON ERROR in analyze_order:", e)
+        print("RAW RESPONSE:")
+        try:
+            print(r.text)
+        except Exception as e2:
+            print("Failed to read raw response:", e2)
+        return r.text if hasattr(r, "text") else ""
 
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
@@ -335,7 +340,9 @@ async def mai(message: Message):
 
         try:
             parsed = json.loads(result)
-        except Exception:
+        except Exception as e:
+            print("JSON ERROR:", e)
+            print("RAW RESPONSE:")
             print(result)
             await loading.edit_text("⚠️ AI вернул неверный формат")
             return
