@@ -132,6 +132,7 @@ USER REQUEST:
         return {"error": "parse", "body": r.text}
 
     return {"content": content}
+print("KEY:", GEMINI_API_KEY)
 
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
