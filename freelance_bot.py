@@ -319,7 +319,6 @@ async def mai(message: Message):
     user_id = message.from_user.id
     if getattr(message, "processing", False):
         return
-    message.processing = True
     if not message.text:
         return
     if user_id not in states:
@@ -329,70 +328,72 @@ async def mai(message: Message):
     if states.get(user_id) != "process":
         return
 
-    add_event(user_id, "send_order")
-    loading = await message.answer("🔍 Analyzing the order...")
-
-    result = await asyncio.to_thread(analyze_order, message.text)
-
-    # handle analyze_order structured result
-    if isinstance(result, dict) and result.get("error"):
-        add_event(user_id, "ai_error")
-        await loading.edit_text(f"⚠️ AI service error: {result.get('error')} {result.get('status','')}")
-        return
-
-    content = result.get("content") if isinstance(result, dict) else result
-
-    # empty or non-text protection
-    if not content or not isinstance(content, str):
-        await loading.edit_text("⚠️ AI вернул пустой ответ")
-        return
-
-    # basic cleanup before JSON parsing
-    content = content.strip()
-    if "```" in content:
-        parts = content.split("```")
-        if len(parts) >= 3:
-            content = parts[1]
-        else:
-            content = parts[-1]
-
+    message.processing = True
     try:
-        parsed = json.loads(content)
-    except Exception:
-        await loading.edit_text("⚠️ AI вернул не JSON (просто повтори запрос)")
-        return
+        add_event(user_id, "send_order")
+        loading = await message.answer("🔍 Analyzing the order...")
 
-    if not parsed.get("proposals"):
-        add_event(user_id, "no_proposals")
-        await loading.edit_text("⚠️ AI не смог подготовить отклики.")
-        return
+        result = await asyncio.to_thread(analyze_order, message.text)
 
-    # Save analysis and proposals in states for later callback handling
-    states[user_id] = {
-        "analysis": parsed.get("analysis", {}),
-        "proposals": parsed.get("proposals", {}),
-    }
+        # handle analyze_order structured result
+        if isinstance(result, dict) and result.get("error"):
+            add_event(user_id, "ai_error")
+            await loading.edit_text(f"⚠️ AI service error: {result.get('error')} {result.get('status','')}")
+            return
 
-    add_event(user_id, "success")
+        content = result.get("content") if isinstance(result, dict) else result
 
-    analysis = states[user_id]["analysis"]
-    summary = analysis.get("summary", "(нет)")
-    risks = analysis.get("risks", [])
-    if isinstance(risks, list):
-        risks_text = "\n- ".join(risks) if risks else "(нет)"
-    else:
-        risks_text = str(risks)
+        # empty or non-text protection
+        if not content or not isinstance(content, str):
+            await loading.edit_text("⚠️ AI вернул пустой ответ")
+            return
 
-    complexity = analysis.get("complexity", "(не указано)")
-    key_points = analysis.get("key_points", [])
-    suggested_stack = analysis.get("suggested_stack", [])
-    clarifying_questions = analysis.get("clarifying_questions", [])
+        # basic cleanup before JSON parsing
+        content = content.strip()
+        if "```" in content:
+            parts = content.split("```")
+            if len(parts) >= 3:
+                content = parts[1]
+            else:
+                content = parts[-1]
 
-    kp_text = "\n- ".join(key_points) if key_points else "(нет)"
-    stack_text = ", ".join(suggested_stack) if suggested_stack else "(не указано)"
-    q_text = "\n- ".join(clarifying_questions) if clarifying_questions else "(нет)"
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            await loading.edit_text("⚠️ AI вернул не JSON (просто повтори запрос)")
+            return
 
-    text = f"""
+        if not parsed.get("proposals"):
+            add_event(user_id, "no_proposals")
+            await loading.edit_text("⚠️ AI не смог подготовить отклики.")
+            return
+
+        # Save analysis and proposals in states for later callback handling
+        states[user_id] = {
+            "analysis": parsed.get("analysis", {}),
+            "proposals": parsed.get("proposals", {}),
+        }
+
+        add_event(user_id, "success")
+
+        analysis = states[user_id]["analysis"]
+        summary = analysis.get("summary", "(нет)")
+        risks = analysis.get("risks", [])
+        if isinstance(risks, list):
+            risks_text = "\n- ".join(risks) if risks else "(нет)"
+        else:
+            risks_text = str(risks)
+
+        complexity = analysis.get("complexity", "(не указано)")
+        key_points = analysis.get("key_points", [])
+        suggested_stack = analysis.get("suggested_stack", [])
+        clarifying_questions = analysis.get("clarifying_questions", [])
+
+        kp_text = "\n- ".join(key_points) if key_points else "(нет)"
+        stack_text = ", ".join(suggested_stack) if suggested_stack else "(не указано)"
+        q_text = "\n- ".join(clarifying_questions) if clarifying_questions else "(нет)"
+
+        text = f"""
 📊 Анализ заказа
 
 📌 Суть:
@@ -412,21 +413,20 @@ async def mai(message: Message):
 - {q_text}
 """
 
-    await loading.edit_text("Готово — смотри анализ ниже:")
-    await message.answer(text)
+        await loading.edit_text("Готово — смотри анализ ниже:")
+        await message.answer(text)
 
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⚡ Быстрый", callback_data="fast")],
-            [InlineKeyboardButton(text="💼 Профи", callback_data="pro")],
-            [InlineKeyboardButton(text="💰 Премиум", callback_data="premium")],
-        ]
-    )
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⚡ Быстрый", callback_data="fast")],
+                [InlineKeyboardButton(text="💼 Профи", callback_data="pro")],
+                [InlineKeyboardButton(text="💰 Премиум", callback_data="premium")],
+            ]
+        )
 
-    await message.answer("Выбери вариант отклика:", reply_markup=kb)
-
-    # finish processing
-    message.processing = False
+        await message.answer("Выбери вариант отклика:", reply_markup=kb)
+    finally:
+        message.processing = False
 
 
 dp.include_router(router)
