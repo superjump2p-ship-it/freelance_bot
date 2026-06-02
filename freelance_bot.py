@@ -2,18 +2,16 @@ import os
 import asyncio
 import sqlite3
 from datetime import datetime
-
-import requests
-import json
 from aiogram import Bot, Dispatcher, Router
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from aiogram.filters import CommandStart, Command
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command, CommandStart
+import json
+import requests
+import logging
 
+# simple logging config
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 conn = sqlite3.connect("database1.db")
 cursor = conn.cursor()
 cursor.execute("""
@@ -183,31 +181,17 @@ PREMIUM:
 GOAL:
 Help freelancer understand the project AND win the client.
 Use communication tone, positivity level, and long-term orientation naturally depending on proposal type (fast / professional / premium).
+CRITICAL RULE:
+Return ONLY valid JSON. No text before or after JSON.
 """,
             },
             {"role": "user", "content": text},
         ],
     }
 
-    try:
-        r = requests.post(url, json=data, headers=headers, timeout=30)
-    except requests.RequestException:
-        return "NETWORK_ERROR"
-
-    if r.status_code != 200:
-        return "⚠️ AI service is temporarily unavailable."
-
-    try:
-        data = r.json()
-        return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        print("JSON ERROR in analyze_order:", e)
-        print("RAW RESPONSE:")
-        try:
-            print(r.text)
-        except Exception as e2:
-            print("Failed to read raw response:", e2)
-        return r.text if hasattr(r, "text") else ""
+    r = requests.post(url, json=data, headers=headers, timeout=30)
+    data = r.json()
+    return data["choices"][0]["message"]["content"]
 
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
@@ -330,27 +314,25 @@ async def mai(message: Message):
 
         result = await asyncio.to_thread(analyze_order, message.text)
 
-        if result == "NETWORK_ERROR":
-            add_event(user_id, "network_error")
-            await loading.edit_text(
-                "⚠️ Сетевая ошибка: не удалось связаться с AI-сервисом. Попробуйте позже."
-            )
-            states[user_id] = None
+        content = result
+
+        if not content:
+            await loading.edit_text("⚠️ Пустой ответ от AI")
+            return
+
+        if not isinstance(content, str):
+            await loading.edit_text("⚠️ AI вернул не текст")
             return
 
         try:
-            parsed = json.loads(result)
-        except Exception as e:
-            print("JSON ERROR:", e)
-            print("RAW RESPONSE:")
-            print(result)
-            await loading.edit_text("⚠️ AI вернул неверный формат")
+            parsed = json.loads(content)
+        except Exception:
+            await loading.edit_text("⚠️ AI вернул не JSON (просто повтори запрос)")
             return
 
         if not parsed.get("proposals"):
             add_event(user_id, "no_proposals")
             await loading.edit_text("⚠️ AI не смог подготовить отклики.")
-            states[user_id] = None
             return
 
         # Save analysis and proposals in states for later callback handling
