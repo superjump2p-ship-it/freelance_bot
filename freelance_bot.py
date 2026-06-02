@@ -195,13 +195,15 @@ Return ONLY valid JSON. No text before or after JSON.
         return {"error": "network"}
 
     if r.status_code != 200:
+        logger.error("OPENROUTER ERROR %s: %s", r.status_code, r.text)
         return {"error": "api", "status": r.status_code, "body": r.text}
 
     try:
         resp = r.json()
         content = resp["choices"][0]["message"]["content"]
     except Exception:
-        return {"error": "parse"}
+        logger.error("NOT JSON OR PARSE ERROR: %s", r.text)
+        return {"error": "parse", "body": r.text}
 
     return {"content": content}
 
@@ -315,6 +317,9 @@ async def stat(message: Message):
 @router.message()
 async def mai(message: Message):
     user_id = message.from_user.id
+    if getattr(message, "processing", False):
+        return
+    message.processing = True
     if not message.text:
         return
     if user_id not in states:
@@ -332,8 +337,7 @@ async def mai(message: Message):
     # handle analyze_order structured result
     if isinstance(result, dict) and result.get("error"):
         add_event(user_id, "ai_error")
-        await loading.edit_text("⚠️ AI service error, попробуйте позже.")
-        states[user_id] = None
+        await loading.edit_text(f"⚠️ AI service error: {result.get('error')} {result.get('status','')}")
         return
 
     content = result.get("content") if isinstance(result, dict) else result
@@ -341,7 +345,6 @@ async def mai(message: Message):
     # empty or non-text protection
     if not content or not isinstance(content, str):
         await loading.edit_text("⚠️ AI вернул пустой ответ")
-        states[user_id] = None
         return
 
     # basic cleanup before JSON parsing
@@ -357,13 +360,11 @@ async def mai(message: Message):
         parsed = json.loads(content)
     except Exception:
         await loading.edit_text("⚠️ AI вернул не JSON (просто повтори запрос)")
-        states[user_id] = None
         return
 
     if not parsed.get("proposals"):
         add_event(user_id, "no_proposals")
         await loading.edit_text("⚠️ AI не смог подготовить отклики.")
-        states[user_id] = None
         return
 
     # Save analysis and proposals in states for later callback handling
@@ -424,8 +425,8 @@ async def mai(message: Message):
 
     await message.answer("Выбери вариант отклика:", reply_markup=kb)
 
-    # clear state so bot won't try to re-analyze arbitrary messages
-    states[user_id] = None
+    # finish processing
+    message.processing = False
 
 
 dp.include_router(router)
