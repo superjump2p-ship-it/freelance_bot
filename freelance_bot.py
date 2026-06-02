@@ -243,7 +243,7 @@ async def start(message: Message):
 @router.callback_query(lambda c: c.data == "order")
 async def button(callback: CallbackQuery):
     user_id = callback.from_user.id
-    states[user_id] = "process"
+    states[user_id] = {"step": "process", "processing": False}
     await callback.message.answer(
         "📋 Send the order description in a single message.\n\n"
         "I will analyze the requirements, highlight the main points, and prepare a response draft."
@@ -255,12 +255,12 @@ async def button(callback: CallbackQuery):
 @router.callback_query(lambda c: c.data in ["fast", "pro", "premium"])
 async def choose(call: CallbackQuery):
     user_id = call.from_user.id
-
-    if user_id not in states or not isinstance(states[user_id], dict):
+    state = states.get(user_id, {})
+    if state.get("step") != "done":
         await call.answer("Сначала отправь заказ")
         return
 
-    proposals = states[user_id].get("proposals")
+    proposals = state.get("proposals")
     if not proposals:
         await call.answer("Нет предложений, сначала отправь заказ")
         return
@@ -317,19 +317,24 @@ async def stat(message: Message):
 @router.message()
 async def mai(message: Message):
     user_id = message.from_user.id
-    if getattr(message, "processing", False):
-        return
     if not message.text:
         return
     if user_id not in states:
         # If user used /start but didn't press the inline "order" button,
         # allow them to send the order directly by entering process mode.
-        states[user_id] = "process"
+        states[user_id] = {"step": "process", "processing": False}
 
-    if states.get(user_id) != "process":
+    state = states.get(user_id, {})
+
+    if state.get("step") != "process":
         return
 
-    message.processing = True
+    if state.get("processing"):
+        return
+
+    # mark as processing in our state store
+    state["processing"] = True
+    states[user_id] = state
     try:
         add_event(user_id, "send_order")
         loading = await message.answer("🔍 Analyzing the order...")
@@ -373,6 +378,8 @@ async def mai(message: Message):
 
         # Save analysis and proposals in states for later callback handling
         states[user_id] = {
+            "step": "done",
+            "processing": False,
             "analysis": parsed.get("analysis", {}),
             "proposals": parsed.get("proposals", {}),
         }
@@ -429,7 +436,10 @@ async def mai(message: Message):
 
         await message.answer("Выбери вариант отклика:", reply_markup=kb)
     finally:
-        message.processing = False
+        try:
+            states[user_id]["processing"] = False
+        except Exception:
+            pass
 
 
 dp.include_router(router)
