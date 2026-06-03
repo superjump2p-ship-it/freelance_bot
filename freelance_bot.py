@@ -1,5 +1,6 @@
 import os
 import asyncio
+
 import sqlite3
 from datetime import datetime
 from aiogram import Bot, Dispatcher, Router
@@ -53,7 +54,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 def analyze_order(text: str):
     if not GEMINI_API_KEY:
+        print("CALL GEMINI")
         return {"error": "NO_API_KEY"}
+
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
 
     headers = {
@@ -61,27 +64,16 @@ def analyze_order(text: str):
     }
 
     prompt = f"""
-ROLE:
-You are a senior freelance software engineer and AI assistant that helps freelancers win jobs.
+You are a senior freelance software engineer and proposal strategist.
 
-You do TWO things:
-1) Analyze client request (business + technical understanding)
-2) Prepare 3 different proposal drafts for different strategies
-
-IMPORTANT:
-You must NOT output final formatted text for client.
-You must return STRICT JSON ONLY.
-
----
-
-OUTPUT FORMAT (STRICT JSON):
+Return ONLY valid JSON:
 
 {{
   "analysis": {{
     "summary": "",
-    "risks": [],
-    "complexity": "easy | medium | hard",
+    "complexity": "easy|medium|hard",
     "key_points": [],
+    "risks": [],
     "suggested_stack": [],
     "clarifying_questions": []
   }},
@@ -92,15 +84,36 @@ OUTPUT FORMAT (STRICT JSON):
   }}
 }}
 
----
+Analysis:
+- Understand business and technical goals.
+- Identify missing requirements.
+- Identify risks.
+- Suggest technologies when relevant.
 
-RULES:
-- Return ONLY valid JSON
-- No markdown
-- No explanation
-- No extra text
+Proposals:
 
-USER REQUEST:
+FAST:
+Short, direct, shows understanding of the task.
+
+PROFESSIONAL:
+Friendly, persuasive, competent, encourages discussion.
+
+PREMIUM:
+Senior-level communication.
+Shows deep understanding.
+Explains approach and risks.
+Creates confidence.
+Encourages long-term cooperation.
+
+Rules:
+- Match client's language.
+- No fake experience.
+- No markdown.
+- No text outside JSON.
+- Make proposals natural and human, not template-based.
+
+Project:
+
 {text}
 """
 
@@ -112,7 +125,10 @@ USER REQUEST:
                     {"text": prompt}
                 ]
             }
-        ]
+        ],
+        "generationConfig": {
+            "maxOutputTokens": 1200
+    }
     }
 
     try:
