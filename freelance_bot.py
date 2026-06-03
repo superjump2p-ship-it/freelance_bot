@@ -1,4 +1,5 @@
 import os
+import requests
 import asyncio
 
 import sqlite3
@@ -7,7 +8,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command, CommandStart
 import json
-import requests
+
 import logging
 
 # simple logging config
@@ -49,17 +50,16 @@ def add_event(user_id, event):
     conn.commit()
 
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 def analyze_order(text: str):
-    if not GEMINI_API_KEY:
-        print("CALL GEMINI")
+    if not GROQ_API_KEY:
         return {"error": "NO_API_KEY"}
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    url = "https://api.groq.com/openai/v1/chat/completions"
 
     headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
 
@@ -84,77 +84,40 @@ Return ONLY valid JSON:
   }}
 }}
 
-Analysis:
-- Understand business and technical goals.
-- Identify missing requirements.
-- Identify risks.
-- Suggest technologies when relevant.
-
-Proposals:
-
-FAST:
-Short, direct, shows understanding of the task.
-
-PROFESSIONAL:
-Friendly, persuasive, competent, encourages discussion.
-
-PREMIUM:
-Senior-level communication.
-Shows deep understanding.
-Explains approach and risks.
-Creates confidence.
-Encourages long-term cooperation.
-
-Rules:
-- Match client's language.
-- No fake experience.
-- No markdown.
-- No text outside JSON.
-- Make proposals natural and human, not template-based.
-
 Project:
-
 {text}
 """
 
     data = {
-        "contents": [
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
             {
                 "role": "user",
-                "parts": [
-                    {"text": prompt}
-                ]
+                "content": prompt
             }
         ],
-        "generationConfig": {
-            "maxOutputTokens": 1200
-    }
+        "temperature": 0.7,
+        "max_tokens": 1200
     }
 
     try:
         r = requests.post(url, json=data, headers=headers, timeout=30)
-    except requests.RequestException:
-        return {"error": "network"}
 
-    if r.status_code != 200:
-        logger.error("OPENROUTER ERROR %s: %s", r.status_code, r.text)
-        return {"error": "api", "status": r.status_code, "body": r.text}
+        if r.status_code != 200:
+            return {"error": "api", "details": r.text}
 
-    try:
-        resp = r.json()
-        content = resp["choices"][0]["message"]["content"]
-    except Exception:
-        logger.error("NOT JSON OR PARSE ERROR: %s", r.text)
-        return {"error": "parse", "body": r.text}
+        result = r.json()
+        content = result["choices"][0]["message"]["content"]
 
-    return {"content": content}
-print("KEY:", GEMINI_API_KEY)
+        return {"content": content}
 
+    except Exception as e:
+        return {"error": str(e)}
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise ValueError("TOKEN not found in environment")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY not found in environment")
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY not found in environment")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
